@@ -1,0 +1,692 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Amelia’s Minefield Challenge</title>
+  <script src="https://js.pusher.com/8.2/pusher.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 10px;
+      background-color: #f0f0f0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 600px;
+    }
+    .view {
+      margin-bottom: 20px;
+      width: 100%;
+      text-align: center;
+    }
+    .board {
+      border: 2px solid #333;
+      background-color: #ccc;
+      display: block;
+      margin: 0 auto;
+    }
+    .info {
+      margin-bottom: 10px;
+      font-size: 14px;
+      text-align: center;
+      color: #4B0082;
+    }
+    .controls {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      justify-content: center;
+    }
+    button {
+      padding: 8px 12px;
+      font-size: 14px;
+      cursor: pointer;
+      border: 1px solid #4B0082;
+      background-color: #E6E6FA;
+      color: #4B0082;
+      border-radius: 4px;
+    }
+    button:disabled {
+      background-color: #aaa;
+      cursor: not-allowed;
+    }
+    #chat {
+      width: 100%;
+      max-width: 400px;
+      height: 80px;
+      margin-top: 10px;
+      resize: none;
+      font-size: 12px;
+      border-color: #4B0082;
+    }
+    #ranking {
+      margin-top: 20px;
+      width: 100%;
+      max-width: 400px;
+      font-size: 12px;
+      color: #4B0082;
+    }
+    #game-over {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(75, 0, 130, 0.8);
+      color: white;
+      padding: 20px;
+      text-align: center;
+      border-radius: 8px;
+      display: none;
+      z-index: 10;
+    }
+    #start-screen {
+      margin-top: 20px;
+      text-align: center;
+      color: #4B0082;
+    }
+    input {
+      padding: 8px;
+      margin: 5px;
+      font-size: 14px;
+      width: 200px;
+      border-color: #4B0082;
+    }
+    @media (max-width: 600px) {
+      .board {
+        width: 360px;
+        height: 360px;
+      }
+      .info, button, input {
+        font-size: 12px;
+      }
+      #chat, #ranking {
+        font-size: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="start-screen">
+    <h3>Amelia’s Minefield Challenge</h3>
+    <p>Stworzone dla Amelii – pokonaj minowe wyzwanie!</p>
+    <div>
+      <input id="player-name" placeholder="Twoja nazwa" value="Gracz">
+    </div>
+    <button onclick="createSession()">Utwórz sesję</button>
+    <div>
+      <input id="session-code" placeholder="Kod sesji (np. abc123)">
+      <button onclick="joinSession()">Dołącz do sesji</button>
+    </div>
+    <button onclick="inviteFriend()">Zaproś znajomego</button>
+  </div>
+  <div class="container" id="game-container" style="display: none;">
+    <div class="view" id="sapper-view" style="display: none;">
+      <div class="info" id="sapper-info">Saper: Ruchy: 0/50 | Flagi: 0/15 | Pola: 0/68 | Punkty: 0</div>
+      <canvas id="sapper-board" width="360" height="360"></canvas>
+      <div class="controls">
+        <button id="sapper-flag">Flaga: WYŁ</button>
+        <button id="sapper-hint" disabled>Amelia’s Hint (5 ruchów)</button>
+      </div>
+    </div>
+    <div class="view" id="miner-view" style="display: none;">
+      <div class="info" id="miner-info">Ustawiacz Min: Miny: 0/15 | Akcje: 0/20 | Punkty: 0</div>
+      <canvas id="miner-board" width="360" height="360"></canvas>
+      <div class="controls">
+        <button id="miner-smoke" disabled>Zasłona Dymna (4 akcje)</button>
+        <button id="miner-fake" disabled>Fałszywa Mina (4 akcje)</button>
+      </div>
+    </div>
+    <textarea id="chat" readonly>Amelia mówi: 😈 Zaryzykujesz? | 😊 Spróbuj!
+Zaproś znajomych: Kliknij „Zaproś znajomego” i wyślij link z kodem sesji!</textarea>
+    <div id="ranking"></div>
+  </div>
+  <div id="game-over"></div>
+  <script>
+    const pusher = new Pusher('7afdf093829e44c68275', { cluster: 'eu' });
+    let channel = null;
+    let sessionId = null;
+    let playerRole = null;
+    let opponentName = null;
+
+    const sapperCanvas = document.getElementById('sapper-board');
+    const minerCanvas = document.getElementById('miner-board');
+    const sapperCtx = sapperCanvas.getContext('2d');
+    const minerCtx = minerCanvas.getContext('2d');
+    const cellSize = 36;
+    const boardSize = 10;
+    const maxMines = 15;
+    const maxMoves = 50;
+    const maxFlags = 15;
+    const maxActionPoints = 20;
+    const goalFields = 68;
+
+    let board = [];
+    let currentTurn = 'sapper';
+    let sapperMoves = 0;
+    let sapperFlags = 0;
+    let sapperFields = 0;
+    let sapperPoints = 0;
+    let minerMines = 0;
+    let minerActionPoints = maxActionPoints;
+    let minerPoints = 0;
+    let smokeScreen = false;
+    let sapperHints = 1;
+    let minerSpecials = 2;
+    let gameOver = false;
+    let flagMode = false;
+    let sapperName = 'Saper';
+    let minerName = 'Ustawiacz Min';
+    const ameliaMessages = [
+      'Amelia wierzy, że unikniesz miny!',
+      'Amelia mówi: uważaj na pułapki!',
+      'Amelia kibicuje: dasz radę!',
+      'Amelia ostrzega: to może być mina!'
+    ];
+
+    // Initialize board
+    function initBoard() {
+      board = Array(boardSize).fill().map(() => Array(boardSize).fill().map(() => ({
+        state: 'hidden',
+        mine: false,
+        fakeMine: false,
+        adjacentMines: 0
+      })));
+    }
+
+    // Draw boards
+    function drawBoards() {
+      sapperCtx.clearRect(0, 0, sapperCanvas.width, sapperCanvas.height);
+      minerCtx.clearRect(0, 0, minerCanvas.width, minerCanvas.height);
+      for (let i = 0; i < boardSize; i++) {
+        for (let j = 0; j < boardSize; j++) {
+          const cell = board[i][j];
+          // Sapper view
+          sapperCtx.strokeStyle = '#4B0082';
+          sapperCtx.strokeRect(j * cellSize, i * cellSize, cellSize, cellSize);
+          if (cell.state === 'hidden') {
+            sapperCtx.fillStyle = '#999';
+            sapperCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+          } else if (cell.state === 'flagged') {
+            sapperCtx.fillStyle = '#4B0082';
+            sapperCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            sapperCtx.fillStyle = '#fff';
+            sapperCtx.font = '16px Arial';
+            sapperCtx.fillText('F', j * cellSize + 10, i * cellSize + 24);
+          } else if (cell.state === 'revealed') {
+            sapperCtx.fillStyle = '#fff';
+            sapperCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            if (cell.adjacentMines > 0 && !smokeScreen) {
+              sapperCtx.fillStyle = ['#00f', '#0f0', '#f00', '#00a', '#a00', '#0aa', '#000', '#555'][cell.adjacentMines - 1];
+              sapperCtx.fillText(cell.adjacentMines, j * cellSize + 10, i * cellSize + 24);
+            }
+          }
+          // Miner view
+          minerCtx.strokeStyle = '#4B0082';
+          minerCtx.strokeRect(j * cellSize, i * cellSize, cellSize, cellSize);
+          if (cell.mine) {
+            minerCtx.fillStyle = '#f00';
+            minerCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            minerCtx.fillStyle = '#fff';
+            minerCtx.font = '16px Arial';
+            minerCtx.fillText('M', j * cellSize + 10, i * cellSize + 24);
+          } else if (cell.fakeMine) {
+            minerCtx.fillStyle = '#f0f';
+            minerCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            minerCtx.fillStyle = '#fff';
+            minerCtx.fillText('FM', j * cellSize + 8, i * cellSize + 24);
+          } else if (cell.state === 'hidden') {
+            minerCtx.fillStyle = '#999';
+            minerCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+          } else if (cell.state === 'flagged') {
+            minerCtx.fillStyle = '#4B0082';
+            minerCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            minerCtx.fillStyle = '#fff';
+            minerCtx.fillText('F', j * cellSize + 10, i * cellSize + 24);
+          } else {
+            minerCtx.fillStyle = '#fff';
+            minerCtx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
+            if (cell.adjacentMines > 0) {
+              minerCtx.fillStyle = ['#00f', '#0f0', '#f00', '#00a', '#a00', '#0aa', '#000', '#555'][cell.adjacentMines - 1];
+              minerCtx.fillText(cell.adjacentMines, j * cellSize + 10, i * cellSize + 24);
+            }
+          }
+        }
+      }
+      updateInfo();
+    }
+
+    // Update info panels
+    function updateInfo() {
+      document.getElementById('sapper-info').textContent = `${sapperName}: Ruchy: ${sapperMoves}/${maxMoves} | Flagi: ${sapperFlags}/${maxFlags} | Pola: ${sapperFields}/${goalFields} | Punkty: ${sapperPoints}`;
+      document.getElementById('miner-info').textContent = `${minerName}: Miny: ${minerMines}/${maxMines} | Akcje: ${minerActionPoints}/${maxActionPoints} | Punkty: ${minerPoints}`;
+      document.getElementById('sapper-flag').textContent = `Flaga: ${flagMode ? 'WŁ' : 'WYŁ'}`;
+      document.getElementById('sapper-hint').disabled = sapperHints <= 0 || currentTurn !== 'sapper' || gameOver || playerRole !== 'sapper';
+      document.getElementById('miner-smoke').disabled = minerSpecials <= 0 || currentTurn !== 'miner' || minerActionPoints < 4 || gameOver || playerRole !== 'miner';
+      document.getElementById('miner-fake').disabled = minerSpecials <= 0 || currentTurn !== 'miner' || minerActionPoints < 4 || gameOver || playerRole !== 'miner';
+      if (channel) {
+        const randomMessage = ameliaMessages[Math.floor(Math.random() * ameliaMessages.length)];
+        document.getElementById('chat').value += `\n${randomMessage} Tura ${currentTurn === 'sapper' ? sapperName : minerName}`;
+        document.getElementById('chat').scrollTop = document.getElementById('chat').scrollHeight;
+      }
+    }
+
+    // Calculate adjacent mines
+    function calculateAdjacentMines(x, y) {
+      let count = 0;
+      for (let i = -1; i <= 1; i++) {
+        for (let j = -1; j <= 1; j++) {
+          if (i === 0 && j === 0) continue;
+          const ni = x + i, nj = y + j;
+          if (ni >= 0 && ni < boardSize && nj >= 0 && nj < boardSize && board[ni][nj].mine) {
+            count++;
+          }
+        }
+      }
+      return count;
+    }
+
+    // Reveal field
+    function revealField(x, y, isHint = false) {
+      if (board[x][y].state !== 'hidden' || board[x][y].state === 'flagged') return;
+      if (board[x][y].mine) {
+        endGame(`${minerName} wygrywa!`);
+        return;
+      }
+      if (board[x][y].fakeMine) {
+        sapperMoves += 2;
+        minerPoints += 3;
+        board[x][y].fakeMine = false;
+        document.getElementById('chat').value += `\nFałszywa mina! ${sapperName} traci 2 ruchy!`;
+      }
+      board[x][y].state = 'revealed';
+      sapperFields++;
+      sapperPoints++;
+      if (!isHint) sapperMoves++;
+      board[x][y].adjacentMines = calculateAdjacentMines(x, y);
+      if (board[x][y].adjacentMines === 0) {
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= 1; j++) {
+            const ni = x + i, nj = y + j;
+            if (ni >= 0 && ni < boardSize && nj >= 0 && nj < boardSize) {
+              revealField(ni, nj);
+            }
+          }
+        }
+      }
+      if (sapperFields >= goalFields) {
+        endGame(`${sapperName} wygrywa!`);
+      } else if (sapperMoves >= maxMoves && sapperFields < goalFields) {
+        endGame('Remis!');
+      }
+      channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+      drawBoards();
+      if (!isHint && sapperMoves < maxMoves) currentTurn = 'miner';
+    }
+
+    // Sapper touch handler
+    sapperCanvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (currentTurn !== 'sapper' || gameOver || playerRole !== 'sapper') return;
+      const rect = sapperCanvas.getBoundingClientRect();
+      const x = Math.floor((e.touches[0].clientY - rect.top) / cellSize);
+      const y = Math.floor((e.touches[0].clientX - rect.left) / cellSize);
+      if (x < 0 || x >= boardSize || y < 0 || y >= boardSize) return;
+      if (flagMode && board[x][y].state === 'hidden' && sapperFlags < maxFlags) {
+        board[x][y].state = 'flagged';
+        sapperFlags++;
+        sapperMoves++;
+        if (board[x][y].mine) sapperPoints += 5;
+        currentTurn = 'miner';
+      } else if (flagMode && board[x][y].state === 'flagged') {
+        board[x][y].state = 'hidden';
+        sapperFlags--;
+        sapperMoves++;
+        if (board[x][y].mine) sapperPoints -= 5;
+        currentTurn = 'miner';
+      } else if (!flagMode && sapperMoves === 0 && !board[x][y].mine) {
+        revealField(x, y);
+      } else if (!flagMode) {
+        revealField(x, y);
+      }
+      channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+      drawBoards();
+    });
+
+    // Miner touch handler
+    minerCanvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (currentTurn !== 'miner' || gameOver || playerRole !== 'miner') return;
+      const rect = minerCanvas.getBoundingClientRect();
+      const x = Math.floor((e.touches[0].clientY - rect.top) / cellSize);
+      const y = Math.floor((e.touches[0].clientX - rect.left) / cellSize);
+      if (x < 0 || x >= boardSize || y < 0 || y >= boardSize) return;
+      if (board[x][y].state === 'hidden' && minerMines < maxMines && minerActionPoints >= 2) {
+        let valid = true;
+        for (let i = -1; i <= 1; i++) {
+          for (let j = -1; j <= 1; j++) {
+            const ni = x + i, nj = y + j;
+            if (ni >= 0 && ni < boardSize && nj >= 0 && nj < boardSize && board[ni][nj].state === 'revealed') {
+              valid = false;
+            }
+          }
+        }
+        if (valid) {
+          board[x][y].mine = true;
+          minerMines++;
+          minerActionPoints -= 2;
+          currentTurn = 'sapper';
+          channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+        }
+      }
+      drawBoards();
+    });
+
+    // Special actions
+    document.getElementById('sapper-flag').addEventListener('click', () => {
+      if (currentTurn !== 'sapper' || gameOver || playerRole !== 'sapper') return;
+      flagMode = !flagMode;
+      channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver, flagMode });
+      drawBoards();
+    });
+
+    document.getElementById('sapper-hint').addEventListener('click', () => {
+      if (sapperHints <= 0 || currentTurn !== 'sapper' || gameOver || playerRole !== 'sapper') return;
+      let candidates = [];
+      for (let i = 0; i < boardSize; i++) {
+        for (let j = 0; j < boardSize; j++) {
+          if (board[i][j].state === 'hidden' && !board[i][j].flagged) {
+            candidates.push([i, j]);
+          }
+        }
+      }
+      if (candidates.length > 0) {
+        const [x, y] = candidates[Math.floor(Math.random() * candidates.length)];
+        revealField(x, y, true);
+        sapperHints--;
+        sapperMoves += 5;
+        document.getElementById('chat').value += `\n${sapperName} użył Amelia’s Hint!`;
+        currentTurn = 'miner';
+        channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+        drawBoards();
+      }
+    });
+
+    document.getElementById('miner-smoke').addEventListener('click', () => {
+      if (minerSpecials <= 0 || currentTurn !== 'miner' || minerActionPoints < 4 || gameOver || playerRole !== 'miner') return;
+      smokeScreen = true;
+      minerSpecials--;
+      minerActionPoints -= 4;
+      document.getElementById('chat').value += `\n${minerName} użył Zasłony Dymnej!`;
+      currentTurn = 'sapper';
+      channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+      drawBoards();
+      setTimeout(() => {
+        smokeScreen = false;
+        channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+        drawBoards();
+      }, 10000);
+    });
+
+    document.getElementById('miner-fake').addEventListener('click', () => {
+      if (minerSpecials <= 0 || currentTurn !== 'miner' || minerActionPoints < 4 || gameOver || playerRole !== 'miner') return;
+      let candidates = [];
+      for (let i = 0; i < boardSize; i++) {
+        for (let j = 0; j < boardSize; j++) {
+          if (board[i][j].state === 'hidden' && !board[i][j].mine && !board[i][j].flagged) {
+            let valid = true;
+            for (let di = -1; di <= 1; di++) {
+              for (let dj = -1; dj <= 1; dj++) {
+                const ni = i + di, nj = j + dj;
+                if (ni >= 0 && ni < boardSize && nj >= 0 && nj < boardSize && board[ni][nj].state === 'revealed') {
+                  valid = false;
+                }
+              }
+            }
+            if (valid) candidates.push([i, j]);
+          }
+        }
+      }
+      if (candidates.length > 0) {
+        const [x, y] = candidates[Math.floor(Math.random() * candidates.length)];
+        board[x][y].fakeMine = true;
+        minerSpecials--;
+        minerActionPoints -= 4;
+        document.getElementById('chat').value += `\n${minerName} użył Fałszywej Miny!`;
+        currentTurn = 'sapper';
+        channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+        drawBoards();
+      }
+    });
+
+    // Pusher session management
+    function createSession() {
+      sessionId = Math.random().toString(36).substring(2, 8);
+      const playerName = document.getElementById('player-name').value || 'Gracz';
+      channel = pusher.subscribe(`game-${sessionId}`);
+      channel.bind('client-player-joined', (data) => {
+        opponentName = data.name;
+        if (playerRole === 'sapper') {
+          minerName = opponentName;
+        } else {
+          sapperName = opponentName;
+        }
+        document.getElementById('chat').value += `\n${opponentName} dołączył do gry!`;
+        startGame();
+      });
+      channel.bind('client-game-state', (data) => {
+        board = data.board;
+        sapperMoves = data.sapperMoves;
+        sapperFlags = data.sapperFlags;
+        sapperFields = data.sapperFields;
+        sapperPoints = data.sapperPoints;
+        minerMines = data.minerMines;
+        minerActionPoints = data.minerActionPoints;
+        minerPoints = data.minerPoints;
+        currentTurn = data.currentTurn;
+        smokeScreen = data.smokeScreen;
+        sapperHints = data.sapperHints;
+        minerSpecials = data.minerSpecials;
+        gameOver = data.gameOver;
+        flagMode = data.flagMode || false;
+        drawBoards();
+      });
+      playerRole = Math.random() < 0.5 ? 'sapper' : 'miner';
+      if (playerRole === 'sapper') {
+        sapperName = playerName;
+      } else {
+        minerName = playerName;
+      }
+      document.getElementById('chat').value += `\nSesja utworzona! Kod: ${sessionId}\nUdostępnij kod, aby zaprosić znajomego!`;
+    }
+
+    function joinSession() {
+      sessionId = document.getElementById('session-code').value.trim();
+      if (!sessionId) {
+        alert('Wpisz kod sesji!');
+        return;
+      }
+      const playerName = document.getElementById('player-name').value || 'Gracz';
+      channel = pusher.subscribe(`game-${sessionId}`);
+      channel.bind('client-game-state', (data) => {
+        board = data.board;
+        sapperMoves = data.sapperMoves;
+        sapperFlags = data.sapperFlags;
+        sapperFields = data.sapperFields;
+        sapperPoints = data.sapperPoints;
+        minerMines = data.minerMines;
+        minerActionPoints = data.minerActionPoints;
+        minerPoints = data.minerPoints;
+        currentTurn = data.currentTurn;
+        smokeScreen = data.smokeScreen;
+        sapperHints = data.sapperHints;
+        minerSpecials = data.minerSpecials;
+        gameOver = data.gameOver;
+        flagMode = data.flagMode || false;
+        drawBoards();
+      });
+      playerRole = 'miner';
+      minerName = playerName;
+      channel.trigger('client-player-joined', { name: playerName });
+      document.getElementById('chat').value += `\nDołączono do sesji ${sessionId}!`;
+      startGame();
+    }
+
+    // Invite friend
+    function inviteFriend() {
+      if (!sessionId) {
+        alert('Najpierw utwórz sesję!');
+        return;
+      }
+      const inviteText = `Hej! Zagraj ze mną w Amelia’s Minefield Challenge! Kliknij link, wpisz kod sesji "${sessionId}" i dołącz: https://username.github.io/ameliasminefield?room=${sessionId}`;
+      if (navigator.share) {
+        navigator.share({
+          title: 'Amelia’s Minefield Challenge',
+          text: inviteText,
+        }).catch(err => alert('Błąd udostępniania: ' + err));
+      } else {
+        alert('Skopiuj i wyślij: ' + inviteText);
+      }
+    }
+
+    // End game
+    function endGame(message) {
+      gameOver = true;
+      if (message.includes(sapperName)) sapperPoints += 50;
+      else if (message.includes(minerName)) minerPoints += 50;
+      updateRanking();
+      document.getElementById('game-over').style.display = 'block';
+      document.getElementById('game-over').innerHTML = `
+        ${message}<br>
+        ${sapperName}: ${sapperPoints} punktów<br>
+        ${minerName}: ${minerPoints} punktów<br>
+        <button onclick="resetGame()">Zagraj ponownie</button>
+        <button onclick="showRanking()">Pokaż Amelia’s Champions</button>
+      `;
+      channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+      drawBoards();
+    }
+
+    // Ranking
+    function updateRanking() {
+      let ranking = JSON.parse(localStorage.getItem('minesweeperRanking') || '{"sapper":[],"miner":[]}');
+      ranking.sapper.push({name: sapperName, points: sapperPoints, wins: sapperPoints >= 50 ? 1 : 0});
+      ranking.miner.push({name: minerName, points: minerPoints, wins: minerPoints >= 50 ? 1 : 0});
+      ranking.sapper.sort((a, b) => b.points - a.points);
+      ranking.miner.sort((a, b) => b.points - a.points);
+      ranking.sapper = ranking.sapper.slice(0, 10);
+      ranking.miner = ranking.miner.slice(0, 10);
+      localStorage.setItem('minesweeperRanking', JSON.stringify(ranking));
+      showRanking();
+    }
+
+    function showRanking() {
+      let ranking = JSON.parse(localStorage.getItem('minesweeperRanking') || '{"sapper":[],"miner":[]}');
+      let html = '<h3>Amelia’s Champions</h3>';
+      html += `<h4>Saper</h4><table><tr><th>Gracz</th><th>Punkty</th><th>Zwycięstwa</th></tr>`;
+      ranking.sapper.forEach((p, i) => {
+        html += `<tr><td>#${i + 1} ${p.name}</td><td>${p.points}</td><td>${p.wins}</td></tr>`;
+      });
+      html += `</table><h4>Ustawiacz Min</h4><table><tr><th>Gracz</th><th>Punkty</th><th>Zwycięstwa</th></tr>`;
+      ranking.miner.forEach((p, i) => {
+        html += `<tr><td>#${i + 1} ${p.name}</td><td>${p.points}</td><td>${p.wins}</td></tr>`;
+      });
+      html += '</table>';
+      document.getElementById('ranking').innerHTML = html;
+    }
+
+    // Start game
+    function startGame() {
+      document.getElementById('start-screen').style.display = 'none';
+      document.getElementById('game-container').style.display = 'flex';
+      document.getElementById(playerRole + '-view').style.display = 'block';
+      resetGame();
+    }
+
+    // Reset game
+    function resetGame() {
+      initBoard();
+      currentTurn = 'sapper';
+      sapperMoves = 0;
+      sapperFlags = 0;
+      sapperFields = 0;
+      sapperPoints = 0;
+      minerMines = 0;
+      minerActionPoints = maxActionPoints;
+      minerPoints = 0;
+      smokeScreen = false;
+      sapperHints = 1;
+      minerSpecials = 2;
+      gameOver = false;
+      flagMode = false;
+      document.getElementById('game-over').style.display = 'none';
+      document.getElementById('chat').value = 'Amelia mówi: 😈 Zaryzykujesz? | 😊 Spróbuj!\nZaproś znajomych: Kliknij „Zaproś znajomego” i wyślij link z kodem sesji!';
+      if (channel) {
+        channel.trigger('client-game-state', { board, sapperMoves, sapperFlags, sapperFields, sapperPoints, minerMines, minerActionPoints, minerPoints, currentTurn, smokeScreen, sapperHints, minerSpecials, gameOver });
+      }
+      drawBoards();
+    }
+
+    // Initialize game
+    initBoard();
+    drawBoards();
+    showRanking();
+
+    // Check for session code in URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomCode = urlParams.get('room');
+    if (roomCode) {
+      document.getElementById('session-code').value = roomCode;
+      joinSession();
+    }
+  </script>
+</body>
+</html>
