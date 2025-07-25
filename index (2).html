@@ -1,0 +1,303 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Amelia’s Minefield Challenge</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #d8bfd8; color: #333; text-align: center; margin: 0; padding: 20px; }
+        canvas { border: 2px solid #8a2be2; display: block; margin: 0 auto; }
+        #gameContainer { display: none; }
+        #chat { height: 100px; overflow-y: auto; border: 1px solid #8a2be2; margin: 10px auto; width: 80%; padding: 10px; }
+        button { background-color: #8a2be2; color: white; padding: 10px; margin: 5px; border: none; cursor: pointer; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #nickname, #sessionId { width: 200px; margin: 5px; padding: 5px; }
+    </style>
+</head>
+<body>
+    <div id="startScreen">
+        <h1>Amelia’s Minefield Challenge 💜</h1>
+        <p>Stworzone dla Amelii 🎉</p>
+        <input type="text" id="nickname" placeholder="Wpisz nick" required>
+        <br>
+        <button onclick="createSession()">Utwórz sesję</button>
+        <br><br>
+        <input type="text" id="sessionId" placeholder="Wpisz kod sesji">
+        <button onclick="joinSession()">Dołącz do sesji</button>
+    </div>
+    <div id="gameContainer">
+        <h2 id="playerNick"></h2>
+        <canvas id="gameCanvas" width="360" height="360"></canvas>
+        <div id="chat"></div>
+        <button id="inviteButton" disabled onclick="inviteFriend()">Zaproś znajomego</button>
+        <button onclick="leaveSession()">Wyjdź</button>
+    </div>
+
+    <script src="https://js.pusher.com/8.2/pusher.min.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let pusher = new Pusher('7afdf093829e44c68275', { cluster: 'eu' }); // Zamień na swój klucz
+        let currentChannel = null;
+        let sessionId = null;
+        let nickname = '';
+        let board = Array(10).fill().map(() => Array(10).fill(0));
+        let mines = [];
+        let sapperMoves = 0;
+        let revealed = Array(10).fill().map(() => Array(10).fill(false));
+        let chatMessages = [];
+        let isSapper = false;
+        let playersConnected = 0;
+        let gameState = { board, mines, sapperMoves, revealed };
+
+        function startScreen() {
+            document.getElementById('startScreen').style.display = 'block';
+            document.getElementById('gameContainer').style.display = 'none';
+        }
+
+        function gameScreen() {
+            document.getElementById('startScreen').style.display = 'none';
+            document.getElementById('gameContainer').style.display = 'block';
+            document.getElementById('playerNick').textContent = nickname;
+            canvas.style.pointerEvents = 'none'; // Wyłącz interakcję na start
+            drawBoard();
+        }
+
+        function drawBoard() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const cellSize = 36;
+            for (let i = 0; i < 10; i++) {
+                for (let j = 0; j < 10; j++) {
+                    ctx.strokeRect(i * cellSize, j * cellSize, cellSize, cellSize);
+                    if (revealed[i][j]) {
+                        ctx.fillStyle = '#90ee90';
+                        ctx.fillRect(i * cellSize, j * cellSize, cellSize, cellSize);
+                        if (board[i][j] > 0) {
+                            ctx.fillStyle = '#000';
+                            ctx.fillText(board[i][j], i * cellSize + cellSize / 2, j * cellSize + cellSize / 2);
+                        }
+                    }
+                }
+            }
+            mines.forEach(mine => {
+                if (!revealed[mine.x][mine.y]) {
+                    ctx.fillStyle = '#ff4500';
+                    ctx.beginPath();
+                    ctx.arc(mine.x * cellSize + cellSize / 2, mine.y * cellSize + cellSize / 2, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            });
+        }
+
+        function generateSessionId() {
+            return Math.random().toString(36).substring(2, 7);
+        }
+
+        function createSession() {
+            nickname = document.getElementById('nickname').value;
+            if (!nickname) {
+                alert('Wpisz nick!');
+                return;
+            }
+            sessionId = generateSessionId();
+            currentChannel = pusher.subscribe(`game-${sessionId}`);
+            currentChannel.bind('pusher:subscription_succeeded', () => {
+                playersConnected = 1;
+                chatMessages.push(`Sesja utworzona! Kod: ${sessionId}`);
+                updateChat();
+            });
+            currentChannel.bind('client-game-state', updateGameState);
+            currentChannel.bind('pusher:member_added', () => {
+                playersConnected++;
+                if (playersConnected === 2) startGame();
+            });
+            enableGameInterface();
+            gameScreen();
+            isSapper = true;
+            sendGameState();
+        }
+
+        function joinSession() {
+            nickname = document.getElementById('nickname').value;
+            sessionId = document.getElementById('sessionId').value || new URLSearchParams(window.location.search).get('room');
+            if (!nickname || !sessionId) {
+                alert('Wpisz nick i kod sesji!');
+                return;
+            }
+            currentChannel = pusher.subscribe(`game-${sessionId}`);
+            currentChannel.bind('pusher:subscription_succeeded', () => {
+                playersConnected = currentChannel.members.count;
+                chatMessages.push(`Dołączono do sesji! Kod: ${sessionId}`);
+                updateChat();
+                if (playersConnected === 1) {
+                    isSapper = true;
+                } else if (playersConnected === 2) {
+                    isSapper = false;
+                    startGame();
+                }
+            });
+            currentChannel.bind('client-game-state', updateGameState);
+            currentChannel.bind('pusher:member_added', () => {
+                playersConnected = currentChannel.members.count;
+                if (playersConnected === 2) startGame();
+            });
+            enableGameInterface();
+            gameScreen();
+            sendGameState();
+        }
+
+        function startGame() {
+            chatMessages.push('Gra rozpoczęta! Saper i Ustawiacz Min gotowi!');
+            updateChat();
+            canvas.style.pointerEvents = 'auto'; // Włącza interakcję dla obu graczy
+            if (isSaper) {
+                // Saper może odkrywać pola
+                canvas.addEventListener('click', handleCanvasClick);
+            } else {
+                // Ustawiacz Min może stawiać miny (prosta logika do rozbudowy)
+                canvas.addEventListener('click', handleMinePlacement);
+            }
+        }
+
+        function updateChat() {
+            const chat = document.getElementById('chat');
+            chat.innerHTML = chatMessages.map(msg => `<p>${msg}</p>`).join('');
+        }
+
+        function sendGameState() {
+            if (currentChannel) {
+                currentChannel.trigger('client-game-state', {
+                    board: board,
+                    mines: mines,
+                    sapperMoves: sapperMoves,
+                    revealed: revealed,
+                    nickname: nickname,
+                    isSapper: isSapper
+                });
+            }
+        }
+
+        function updateGameState(data) {
+            board = data.board;
+            mines = data.mines;
+            sapperMoves = data.sapperMoves;
+            revealed = data.revealed;
+            isSapper = data.isSapper; // Upewnia się, że rola jest zsynchronizowana
+            drawBoard();
+            if (data.nickname !== nickname) {
+                chatMessages.push(`${data.nickname} wykonał ruch!`);
+                updateChat();
+            }
+        }
+
+        function enableGameInterface() {
+            canvas.style.pointerEvents = 'none'; // Domyślnie wyłączone, włączane w startGame()
+            document.getElementById('inviteButton').disabled = false;
+        }
+
+        function handleCanvasClick(event) {
+            if (!isSaper || sapperMoves >= 50) return;
+            const cellSize = 36;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((event.clientX - rect.left) / cellSize);
+            const y = Math.floor((event.clientY - rect.top) / cellSize);
+            if (x >= 0 && x < 10 && y >= 0 && y < 10 && !revealed[x][y]) {
+                revealed[x][y] = true;
+                if (mines.some(mine => mine.x === x && mine.y === y)) {
+                    chatMessages.push(`${nickname} trafił na minę! Gra zakończona.`);
+                    sapperMoves = 50;
+                } else {
+                    countMinesAround(x, y);
+                    sapperMoves++;
+                }
+                drawBoard();
+                sendGameState();
+            }
+        }
+
+        function handleMinePlacement(event) {
+            if (isSapper || mines.length >= 10) return; // Limit 10 min
+            const cellSize = 36;
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((event.clientX - rect.left) / cellSize);
+            const y = Math.floor((event.clientY - rect.top) / cellSize);
+            if (x >= 0 && x < 10 && y >= 0 && y < 10 && !mines.some(mine => mine.x === x && mine.y === y)) {
+                mines.push({ x, y });
+                chatMessages.push(`${nickname} postawił minę!`);
+                drawBoard();
+                sendGameState();
+            }
+        }
+
+        function inviteFriend() {
+            const inviteLink = `${window.location.href.split('?')[0]}?room=${sessionId}`;
+            if (navigator.share) {
+                navigator.share({
+                    title: 'Zagraj w Amelia’s Minefield Challenge!',
+                    text: `Hej! Zagraj ze mną! Kod sesji: ${sessionId}. Kliknij link: ${inviteLink}`,
+                    url: inviteLink
+                }).catch(err => alert('Udostępnianie nie działało: ' + err));
+            } else {
+                alert(`Wyślij ten link znajomemu: ${inviteLink}`);
+            }
+            chatMessages.push('Link zaproszenia wysłany!');
+            updateChat();
+        }
+
+        function leaveSession() {
+            if (currentChannel) pusher.unsubscribe(`game-${sessionId}`);
+            chatMessages.push(`${nickname} opuścił sesję.`);
+            updateChat();
+            startScreen();
+            sessionId = null;
+            currentChannel = null;
+            board = Array(10).fill().map(() => Array(10).fill(0));
+            mines = [];
+            sapperMoves = 0;
+            revealed = Array(10).fill().map(() => Array(10).fill(false));
+            playersConnected = 0;
+        }
+
+        startScreen();
+    </script>
+</body>
+</html>
